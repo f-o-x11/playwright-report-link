@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Share a Playwright HTML report as a link</title>
+<meta name="description" content="Turn the single-file Playwright HTML report into a permanent URL you can paste into a PR or chat, with a confirm prompt before anything goes public.">
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1d1d1f}pre{background:#f4f4f6;padding:14px;overflow:auto;border-radius:6px;font-size:14px}code{font-family:ui-monospace,monospace}h2{margin-top:2em}</style></head>
+<body>
+<h1>Share a Playwright HTML report as a link</h1>
+<p>Playwright's HTML reporter writes <code>playwright-report/index.html</code>. When the run has no screenshots, videos or traces, that file is fully self-contained (our three-test example came out at about 510 KB), so a teammate can open it anywhere. The awkward part is getting it to them: zipping it into a chat, or downloading a CI artifact and running <code>npx playwright show-report</code>.</p>
+<p>This guide publishes that one file to a permanent HTTPS URL with <a href="https://deed.page">deed.page</a>, a static host that takes a single PUT and needs no account. The script asks before it publishes, because anyone with the link can open the report.</p>
+<p>Disclosure: this guide is written by the deed.page team.</p>
+
+<h2>1. Make the report</h2>
+<pre><code>npx playwright test --reporter=html
+ls playwright-report/   # index.html, plus data/ only if there are attachments</code></pre>
+
+<h2>2. The publish script</h2>
+<p>Save it as <code>publish-playwright-report.sh</code> (<a href="publish-playwright-report.sh">download</a>) and <code>chmod +x</code> it.</p>
+<pre><code>#!/bin/sh
+set -eu
+FILE=${1:?path to playwright-report/index.html}; SLUG=${2:?slug, e.g. my-app-e2e-7k2p}
+DIR=$(dirname "$FILE")
+if [ -d "$DIR/data" ] &amp;&amp; [ -n "$(ls -A "$DIR/data" 2&gt;/dev/null)" ]; then
+  echo "This report has attachments in $DIR/data. Use the manifest upload in https://deed.page/docs."; exit 1
+fi
+printf 'Publish %s to https://%s.deed.page/ ? Anyone with the link can open it. [y/N] ' "$FILE" "$SLUG"
+read -r ans; [ "$ans" = "y" ] || { echo "Not published."; exit 0; }
+DEEDPAGE_TOKEN=${DEEDPAGE_TOKEN:-$(cat ~/.config/deed-page/token 2&gt;/dev/null || true)}
+set --; if [ -n "$DEEDPAGE_TOKEN" ]; then set -- -H "Authorization: Bearer $DEEDPAGE_TOKEN"; fi
+RESP=$(curl -sS -T "$FILE" -H "Content-Type: text/html" \
+  "https://deed.page/v1/sites?slug=$SLUG" -H "X-Client: playwright-report-script" "$@")
+TOKEN=$(printf '%s' "$RESP" | sed -n 's/.*"token": *"\(deed_tok_[^"]*\)".*/\1/p')
+if [ -n "$TOKEN" ]; then (umask 077 &amp;&amp; mkdir -p ~/.config/deed-page &amp;&amp; chmod 700 ~/.config/deed-page \
+  &amp;&amp; printf '%s' "$TOKEN" &gt; ~/.config/deed-page/token &amp;&amp; chmod 600 ~/.config/deed-page/token); fi
+printf '%s\n' "$RESP" | sed 's/"token": *"[^"]*"/"token":"&lt;saved&gt;"/'</code></pre>
+
+<h2>3. Run it</h2>
+<pre><code>./publish-playwright-report.sh playwright-report/index.html checkout-e2e-7k2p
+Publish playwright-report/index.html to https://checkout-e2e-7k2p.deed.page/ ? ... [y/N] y
+{"ok":true,"url":"https://checkout-e2e-7k2p.deed.page/", ... "token":"&lt;saved&gt;"}</code></pre>
+<p>Answer anything but <code>y</code> and nothing is uploaded. The first publish returns an owner token once; the script writes it to <code>~/.config/deed-page/token</code> (mode 600) and masks it in the output, so it never lands in your terminal log or CI output. Later runs to the same slug send that token and replace the report in place, so the link in your PR description keeps showing the latest run. Republishing an identical file comes back with <code>"unchanged":true</code>.</p>
+
+<h2>4. Clean up</h2>
+<pre><code>curl -X DELETE -H "Authorization: Bearer $(cat ~/.config/deed-page/token)" \
+  https://deed.page/v1/sites/checkout-e2e-7k2p</code></pre>
+
+<h2>Notes</h2>
+<ul>
+<li>Pick a slug with a random suffix; short names like <code>my-site</code> are reserved.</li>
+<li>Reports with screenshots or traces have a <code>data/</code> folder. The script stops there instead of publishing a report with broken attachments; upload the folder with the manifest flow in the <a href="https://deed.page/docs">deed.page docs</a>.</li>
+<li>Free sites show a small "Published with deed.page" badge and are public. Don't publish reports that contain secrets, customer data or internal URLs.</li>
+<li>In CI, don't put the prompt in an unattended job. Keep this as a step a person runs, or require an explicit approval input before it runs.</li>
+</ul>
+<p>We tested this script end to end on 2026-11-03 with @playwright/test: decline, publish, republish (unchanged), and delete (the URL returned 404 afterwards).</p>
+</body></html>
